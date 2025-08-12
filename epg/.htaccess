@@ -1,0 +1,19 @@
+<IfModule mod_rewrite.c>
+RewriteEngine On
+
+# 重写 /tv.txt
+RewriteCond %{QUERY_STRING} !(^|&)type=txt(&|$)
+RewriteRule ^tv\.txt$ index.php?type=txt&%{QUERY_STRING} [L]
+
+# 重写 /tv.m3u
+RewriteCond %{QUERY_STRING} !(^|&)type=m3u(&|$)
+RewriteRule ^tv\.m3u$ index.php?type=m3u&%{QUERY_STRING} [L]
+
+# 重写 /t.xml
+RewriteCond %{QUERY_STRING} !(^|&)type=xml(&|$)
+RewriteRule ^t\.xml$ index.php?type=xml&%{QUERY_STRING} [L]
+
+# 重写 /t.xml.gz
+RewriteCond %{QUERY_STRING} !(^|&)type=gz(&|$)
+RewriteRule ^t\.xml\.gz$ index.php?type=gz&%{QUERY_STRING} [L]
+</IfModule>
