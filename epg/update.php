@@ -183,7 +183,7 @@ function getChannelBindEPG() {
 }
 
 // 下载 XML 数据并存入数据库
-function downloadXmlData($xml_url, $userAgent, $db, &$log_messages, $gen_list, $white_list, $black_list, $time_offset) {
+function downloadXmlData($xml_url, $userAgent, $db, &$log_messages, $gen_list, $white_list, $black_list, $time_offset, $replacePattern, $bindPattern) {
     global $Config;
     [$xml_data, $error, $mtime] = downloadData($xml_url, $userAgent);
     if ($xml_data !== false) {
@@ -202,12 +202,48 @@ function downloadXmlData($xml_url, $userAgent, $db, &$log_messages, $gen_list, $
             ? round($fileSize / 1048576, 2) . ' MB' 
             : round($fileSize / 1024, 2) . ' KB';
         logMessage($log_messages, "【下载】 成功 | xml 文件大小：{$fileSizeReadable}{$mtimeStr}");
-
+        
         $xml_data = mb_convert_encoding($xml_data, 'UTF-8'); // 转换成 UTF-8 编码
+
+        // 简单验证XML格式
+        if (stripos(trim($xml_data), '<?xml') !== 0) {
+            static $retryCount = 0;
+            if ($retryCount < 5) {
+                $retryCount++;
+                logMessage($log_messages, "【格式错误！！！】 不是有效的XML文件，10秒后重试 ({$retryCount}/5)");
+                sleep(10);
+                return downloadXmlData($xml_url, $userAgent, $db, $log_messages, $gen_list, $white_list, $black_list, $time_offset, $replacePattern, $bindPattern);
+            } else {
+                logMessage($log_messages, "【格式错误！！！】 重试5次后仍不是有效的XML文件");
+                echo "<br>";
+                return;
+            }
+        }
+
+        // 应用多个字符串替换规则（JSON格式或老格式 a->b,...）
+        if (!empty($replacePattern)) {
+            $jsonRules = json_decode($replacePattern, true);
+            
+            if (json_last_error() === JSON_ERROR_NONE && is_array($jsonRules)) {
+                // JSON格式
+                foreach ($jsonRules as $search => $replace) {
+                    $xml_data = str_replace($search, $replace, $xml_data);
+                }
+            } elseif (strpos($replacePattern, '->') !== false) {
+                // 兼容老格式
+                foreach (explode(',', $replacePattern) as $rule) {
+                    if (strpos($rule, '->') !== false) {
+                        [$search, $replace] = array_map('trim', explode('->', $rule, 2));
+                        $xml_data = str_replace($search, $replace, $xml_data);
+                    }
+                }
+            }
+        }
+
         if (($Config['cht_to_chs'] ?? 1) === 2) { $xml_data = t2s($xml_data); }
         $db->beginTransaction();
         try {
-            [$processCount, $skipCount] = processXmlData($xml_url, $xml_data, $db, $gen_list, $white_list, $black_list, $time_offset);
+            [$processCount, $skipCount] = processXmlData($xml_url, $xml_data, $db, $gen_list, $white_list, $black_list, $time_offset, $bindPattern);
             $db->commit();
             logMessage($log_messages, "【更新】 成功：入库 {$processCount} 条，跳过 {$skipCount} 条");
         } catch (Exception $e) {
@@ -221,7 +257,7 @@ function downloadXmlData($xml_url, $userAgent, $db, &$log_messages, $gen_list, $
 }
 
 // 处理 XML 数据并逐步存入数据库
-function processXmlData($xml_url, $xml_data, $db, $gen_list, $white_list, $black_list, $time_offset) {
+function processXmlData($xml_url, $xml_data, $db, $gen_list, $white_list, $black_list, $time_offset, $bindPattern) {
     global $Config, $processedRecords, $channel_bind_epg, $thresholdDate;
 
     // 统计处理数据量
@@ -234,13 +270,22 @@ function processXmlData($xml_url, $xml_data, $db, $gen_list, $white_list, $black
     }
 
     $cleanChannelNames = [];
+    $bindRules = json_decode($bindPattern, true) ?: [];
 
     // 读取频道数据
     while ($reader->read() && $reader->name !== 'channel');
     while ($reader->name === 'channel') {
         $channel = new SimpleXMLElement($reader->readOuterXML());
         $channelId = (string)$channel['id'];
-        $cleanChannelNames[$channelId] = cleanChannelName((string)$channel->{'display-name'});
+        $channelDisplayName = (string)$channel->{'display-name'};
+
+        // 先检查 bindPattern
+        if (isset($bindRules[$channelDisplayName]) && $bindRules[$channelDisplayName] !== $channelId) {
+            $reader->next('channel');
+            continue;
+        }
+
+        $cleanChannelNames[$channelId] = cleanChannelName($channelDisplayName);
         $reader->next('channel');
     }
 
@@ -322,6 +367,7 @@ function processXmlData($xml_url, $xml_data, $db, $gen_list, $white_list, $black
                     'title' => $programmeData['title'],
                     'desc' => $programmeData['desc']
                 ];
+                $programmeCount++;
             }
     
             $currentChannelProgrammes[$channelId]['channel_name'] = $channelName;
@@ -564,34 +610,59 @@ foreach ($Config['xml_urls'] as $xml_url) {
     // 更新 XML 数据
     $xml_parts = explode('#', $xml_url);
     $cleaned_url = trim($xml_parts[0]);
-    $userAgent = '';
-    $white_list = $black_list = [];
-    $time_offset = '';
-    
     logMessage($log_messages, "【地址】 $cleaned_url");
+    
+    $userAgent = $time_offset = $replacePattern = $bindPattern = '';
+    $white_list = $black_list = [];
 
     foreach ($xml_parts as $part) {
         $part = trim($part);
-        if (stripos($part, 'UA=') === 0 || stripos($part, 'useragent=') === 0) {
-            $userAgent = substr($part, strpos($part, '=') + 1);
-            logMessage($log_messages, "【自定】 UA：$userAgent");
-        } elseif (stripos($part, 'FT=') === 0 || stripos($part, 'filter=') === 0) {
-            $filter_raw = strtoupper(t2s(trim(substr($part, strpos($part, '=') + 1))));
-            $list = array_map('trim', explode(',', ltrim($filter_raw, '!')));
-            if (strpos($filter_raw, '!') === 0) {
-                $black_list = $list;
-                logMessage($log_messages, "【临时】 屏蔽频道：" . implode(", ", $black_list));
-            } else {
-                $white_list = $list;
-                logMessage($log_messages, "【临时】 限定频道：" . implode(", ", $white_list));
-            }
-        } elseif (stripos($part, 'TO=') === 0 || stripos($part, 'timeoffset=') === 0) {
-            $time_offset = substr($part, strpos($part, '=') + 1);
-            logMessage($log_messages, "【修正】 时间偏移：$time_offset");
+        if (strpos($part, '=') === false) continue;
+    
+        [$key, $value] = explode('=', $part, 2);
+        $key = strtolower(trim($key));
+        $value = trim($value);
+    
+        switch ($key) {
+            case 'ua':
+            case 'useragent':
+                $userAgent = $value;
+                logMessage($log_messages, "【自定】 UA：$userAgent");
+                break;
+    
+            case 'ft':
+            case 'filter':
+                $filter_raw = strtoupper(t2s($value));
+                $list = array_map('trim', explode(',', ltrim($filter_raw, '!')));
+                if ($filter_raw[0] === '!') {
+                    $black_list = $list;
+                    logMessage($log_messages, "【临时】 屏蔽频道：" . implode(", ", $black_list));
+                } else {
+                    $white_list = $list;
+                    logMessage($log_messages, "【临时】 限定频道：" . implode(", ", $white_list));
+                }
+                break;
+    
+            case 'to':
+            case 'timeoffset':
+                $time_offset = $value;
+                logMessage($log_messages, "【修正】 时间偏移：$time_offset");
+                break;
+    
+            case 'rp':
+            case 'replace':
+                $replacePattern = $value;
+                logMessage($log_messages, "【替换】 $replacePattern");
+                break;
+    
+            case 'bind':
+                $bindPattern = $value;
+                logMessage($log_messages, "【绑定】 $bindPattern");
+                break;
         }
     }
     
-    downloadXmlData($cleaned_url, $userAgent, $db, $log_messages, $gen_list, $white_list, $black_list, $time_offset);
+    downloadXmlData($cleaned_url, $userAgent, $db, $log_messages, $gen_list, $white_list, $black_list, $time_offset, $replacePattern, $bindPattern);
 }
 
 // 更新 iconList.json 及生成 xmltv 文件

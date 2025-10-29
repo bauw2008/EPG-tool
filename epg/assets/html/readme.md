@@ -7,18 +7,17 @@
 `URL #TO=+0100`（添加时间偏移）  
 `URL #FT=频道名1, 频道ID2`（白名单，精确匹配）  
 `URL #FT=!频道名1, 频道ID2`（黑名单，精确匹配）  
-选项对照表（任选其一即可）：`UA/useragent, TO/timeoffset, FT/filter`  
-tvmao示例：`tvmao, 频道id, [自定义:]频道id, ...`  
-cntv示例：`cntv[:n], 频道id, [自定义:]频道id, ...`  
-[] 表示可选（使用时不包含[]），`:n` 表示未来 n 天数据，缺省为 1  
+`URL #RP={"a1":"b1", "a2":"b2"}`（字符串替换）  
+`URL #BIND={"频道名1":"频道ID1", "频道名2":"频道ID2"}`（频道ID绑定）  
+选项对照表（任选其一即可）：`UA/useragent, TO/timeoffset, FT/filter, RP/replace`  
 频道指定 EPG 源：设置后，频道数据仅通过指定源更新  
-优先级：xml 源越靠前，优先级越高；tvmao 跟 cntv 强制覆盖已有数据
+优先级：xml 源越靠前，优先级越高；自定义源强制覆盖已有数据
 
 ### 频道别名
 格式：`数据库频道名 => 频道别名1, 频道别名2, ...`  
 支持正则表达式，如：`$1 => regex:/^iHOT(.*)/i` 将前缀 iHOT 去掉  
 建议使用「频道管理」页面修改  
-频道忽略字符：处理频道名时直接忽略的字符，默认为空格（&nbsp）及 -
+频道忽略字符：处理频道名时直接忽略的字符，默认为 `空格（&nbsp）` 及 `-`
 
 ### 台标管理
 默认列表：`/assets/defaultList.json`  
@@ -54,14 +53,18 @@ Memcached：已移除相关设置，默认打开，缓存在更新数据时清�
 地址前 `#` 临时停用，后 `#` 备注或设置参数，快捷键：Ctrl+/  
 `URL #PF=分组前缀`  
 `URL #UA=自定义UA`  
-`URL #RP=a1->b2, a2->b2, ...`（字符串替换）  
+`URL #RP={"a1":"b1", "a2":"b2"}`（字符串替换，`\#` 代表 `#` ，`\n` 代表 `换行`）  
 `URL #FT=频道名1, 分组2, 直播地址3`（白名单，模糊匹配）  
 `URL #FT=!频道名1, 分组2, 直播地址3`（黑名单，模糊匹配）  
+`URL #EXTVLCOPT={"http-user-agent":"xxx", "http-referrer":"xxx"}`（加入额外 `#EXTVLCOPT` 标签）  
+`URL #EXTINFOPT={"catchup":"xxx", "catchup-source":"xxx"}`（`#EXTINF` 标签加入额外信息）  
+`URL #PROXY=1/0`（强制开启/关闭代理）  
 选项对照表（任选其一即可）：`PF/prefix, UA/useragent, RP/replace, FT/filter`  
 多参数：`URL #PF=分组前缀 #UA=自定义UA`  
 在生成 m3u 文件时，「台标地址」、「tvg-id」、「tvg-name」字段可选  
 转换直播源：`http://xxx.xx/tv.m3u?token=xxx&url=xxx` 或 `http://xxx.xx/tv.txt?token=xxx&url=xxx`  
 可添加 `&latest=1` 获取最新文件，不读取缓存  
+代理访问：对请求进行代理转发  
 测速校验：检验每个直播源的访问速度及分辨率，无法访问则停用  
 清理缓存数据：删除所有直播源修改记录及未出现在列表中的直播源文件缓存  
 停用：停用后不会出现在生成的直播源文件中，包括单个直播源  
@@ -70,7 +73,8 @@ Memcached：已移除相关设置，默认打开，缓存在更新数据时清�
 分组为「default」时，包含所有来源数据并使用原分组名称  
 打开「模糊匹配」后支持正则表达式，如 `regex:/^频道名$/` 进行精确匹配  
 模糊匹配：默认开启，选「否」进行精确匹配  
-线路备注：默认关闭，在直播地址后添加「$分组」
+线路备注：默认关闭，在直播地址后添加「$分组」  
+酷9二级分组：默认关闭，打开后将用「分组前缀」生成一级分组
 
 ### 直播源管理使用示例
 
@@ -83,24 +87,31 @@ URL2 #PF=分组前缀2
 #### 示例二：将模板文件替换成本地可用文件  
 设置直播源，并设置直播源内容替换  
 ```
-http://xxx.xx.m3u #RP=rtp://->http://192.168.1.1:6777/udpxy/
+http://xxx.xx.m3u #RP={"rtp://":"http://192.168.1.1:6777/udpxy/"}
 ```
 这里假设xx.m3u为组播直播源，192.168.1.1:6777为udpxy服务端地址
 
 #### 示例三：重命名直播源分组名  
-将「分组1」重命名为「分组2」，「分组3」重命名为「分组4」  
+将「分组1」重命名为「分组2」  
 ```
-http://xxx.xx.m3u #RP=group-title="分组1"->group-title="分组2", group-title="分组3"->group-title="分组4"
+http://xxx.xx.m3u #RP={"group-title=\"分组1\"":"group-title=\"分组2\""}
 ```
-#### 示例四：屏蔽分组、频道、直播源  
+#### 示例四：在直播地址前加入自定义信息  
+在所有直播地址前加入一行，包含自定义 User-Agent、Referrer 信息  
+```
+http://xxx.xx.m3u #EXTVLCOPT={"http-user-agent":"xxx", "http-referrer":"xxx"}
+```
+在所有直播地址前的 `#EXTINF` 标签中加入 catchup、catchup-source 信息
+```
+http://xxx.xx.m3u #EXTINFOPT={"catchup":"append", "catchup-source":"?playseek=xxx"}
+```
+#### 示例五：屏蔽分组、频道、直播源  
 屏蔽包含「购物、央视、127.0.0.1」关键字的分组、频道、直播源  
 ```
 http://xxx.xx.m3u #FT=!购物, 央视, 127.0.0.1
-
 ```
-#### 示例五：使用模板聚合直播源  
-⚠️ 模糊匹配：默认开启，选「否」进行精准匹配  
-⚠️ 路线备注：默认关闭，选「是」在直播地址后添加「$分组」（TiviMate、Televizo、PotPlayer等m3u播放器一般都需要关闭）  
+#### 示例六：使用模板聚合直播源  
+⚠️ 模糊匹配：默认开启，选「否」进行精准匹配
 
 ##### 模板示例：
 
@@ -145,8 +156,7 @@ regex:/^翡翠台$/, regex:/^黄金翡翠台$/
 #抖音虎牙直播, http://xxx.m3u, https://xxx.txt
 regex:/.*/
 ```
-#### 示例六：直播源转换  
-
+#### 示例七：直播源转换  
 m3u 转 txt:  
 ```
 http://xxx.xx/tv.txt?token=xxx&url=https://xxx.xx/xx.m3u
@@ -162,7 +172,7 @@ http://xxx.xx/tv.m3u?token=xxx&url=https://xxx.xx/xx.txt
 
 抓取最新文件：在末尾加上 `&latest=1` ，不加的话默认读取缓存
 
-#### 示例七：托管本地直播源文件  
+#### 示例八：托管本地直播源文件  
 上传本地直播源文件（m3u/txt），假设上传文件名为ipv6.m3u  
 
 访问文件  

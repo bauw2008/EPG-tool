@@ -1,5 +1,14 @@
 // 页面加载时预加载数据，减少等待时间
 document.addEventListener('DOMContentLoaded', function() {
+    // 新用户弹出使用说明
+    if ((!document.getElementById('xml_urls')?.value.trim()) &&
+        document.getElementById('start_time').value === '00:00' &&
+        document.getElementById('end_time').value === '23:59' &&
+        document.getElementById('interval_hour').value === '6' &&
+        document.getElementById('interval_minute').value === '0') {
+        showHelpModal();
+    }
+
     showModal('live', popup = false);
     showModal('channel', popup = false);
     showModal('update', popup = false);
@@ -14,8 +23,8 @@ document.getElementById('settingsForm').addEventListener('submit', function(even
         'db_type', 'mysql_host', 'mysql_dbname', 'mysql_username', 'mysql_password', 'cached_type', 'gen_list_enable', 
         'check_update', 'token_range', 'user_agent_range', 'debug_mode', 'target_time_zone', 'ip_list_mode', 'live_source_config', 
         'live_template_enable', 'live_fuzzy_match', 'live_url_comment', 'live_tvg_logo_enable', 'live_tvg_id_enable', 
-        'live_tvg_name_enable', 'live_source_auto_sync', 'live_channel_name_process', 'gen_live_update_time', 
-        'm3u_icon_first', 'check_ipv6', 'min_resolution_width', 'min_resolution_height', 'urls_limit','sort_by_delay', 
+        'live_tvg_name_enable', 'live_source_auto_sync', 'live_channel_name_process', 'gen_live_update_time', 'm3u_icon_first', 
+        'ku9_secondary_grouping', 'check_ipv6', 'min_resolution_width', 'min_resolution_height', 'urls_limit','sort_by_delay', 
         'check_speed_auto_sync', 'check_speed_interval_factor'];
 
     // 创建隐藏字段并将其添加到表单
@@ -140,6 +149,23 @@ function handleKeydown(event) {
         // 恢复光标位置
         textarea.setSelectionRange(newSelectionStart, newSelectionEnd);
     }
+}
+
+// 禁用/启用所有源
+function commentAll(id) {
+    const textarea = document.getElementById(id);
+    const lines = textarea.value.split('\n');
+    const allCommented = lines.every(line => line.trim().startsWith('#'));
+    const newLines = lines.map(line => {
+        return allCommented ? line.replace(/^#\s*/, '') : '# ' + line;
+    });
+    textarea.value = newLines.join('\n');
+}
+
+// 调整移动端布局
+if (/Mobi|Android|iPhone/i.test(navigator.userAgent)) {
+    document.getElementById('xml_urls').style.minHeight = '350px';
+    document.getElementById('sourceUrlTextarea').style.minHeight = '300px';
 }
 
 // 格式化时间
@@ -280,7 +306,7 @@ function showExecResult(fileName, callback, fullSize = true) {
 
     const wrapper = document.createElement('div');
     if (fullSize) {
-        wrapper.style.width = '930px';
+        wrapper.style.width = '1000px';
         wrapper.style.height = '504px';
     } else {
         wrapper.style.maxWidth = '600px';
@@ -346,7 +372,7 @@ function showHelpModal() {
         });
 }
 
-// 显示捐赠图片
+// 显示打赏图片
 function showDonationImage() {
     const isDark = document.body.classList.contains('dark');
     const img = isDark ? 'assets/img/buymeacofee-dark.png' : 'assets/img/buymeacofee.png';
@@ -467,11 +493,11 @@ function showAccessLogModal() {
 
                 const pre = box.querySelector("pre");
                 if (!pre) {
-                    box.innerHTML = `<pre>${d.content || ""}</pre><div>持续刷新中...</div>`;
+                    box.innerHTML = `<pre>${highlightIPs(d.content || "")}</pre><div>持续刷新中...</div>`;
                     box.scrollTop = box.scrollHeight;
                 } else if (d.changed && d.content) {
                     const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
-                    pre.innerText += d.content;
+                    pre.innerHTML += highlightIPs(d.content);
                     if (atBottom) box.scrollTop = box.scrollHeight;
                 }
 
@@ -493,6 +519,14 @@ function showAccessLogModal() {
     };
 }
 
+// 把文本里的 IP 转成可点击链接
+function highlightIPs(text) {
+    const ipRegex = /\b\d{1,3}(?:\.\d{1,3}){3}\b/g;
+    return text.replace(ipRegex, ip => {
+        return `<a href="#" onclick="queryIpLocation('${ip}', true); return false;">${ip}</a>`;
+    });
+}
+
 // 访问日志统计
 function showAccessStats() {
     clearInterval(timer);
@@ -512,6 +546,7 @@ function showAccessStats() {
 
 let currentSort = { column: 'total', order: 'desc' };
 let cachedData = { ipData: [], dates: [], rawStats: {} };
+let ipLocationCache = {};
 
 function loadAccessStats() {
     const tbody = document.querySelector("#accessStatsTable tbody");
@@ -568,6 +603,7 @@ function renderTableHeader(dates) {
     return `
         <tr>
             <th onclick="sortByColumn('ip')">IP地址${arrow('ip')}</th>
+            <th>归属地</th>
             ${dates.map(date => `<th onclick="sortByColumn('${date}')">${date.slice(5)}${arrow(date)}</th>`).join('')}
             <th onclick="sortByColumn('deny')">拒绝${arrow('deny')}</th>
             <th onclick="sortByColumn('total')">总计${arrow('total')}</th>
@@ -581,6 +617,7 @@ function renderTableRow({ ip, counts, total, deny }) {
     return `
         <tr>
             <td><a href="#" onclick="filterLogByIp('${ip}'); return false;">${ip}</a></td>
+            <td id="loc-${ip}"><a href="#" onclick="queryIpLocation('${ip}'); return false;">点击查询</a></td>
             ${countCells}
             <td>${deny}</td>
             <td>${total}</td>
@@ -592,15 +629,47 @@ function renderTableRow({ ip, counts, total, deny }) {
     `;
 }
 
+function queryIpLocation(ip, showModal = false) {
+    const cell = document.getElementById(`loc-${ip}`);
+
+    // 如果有缓存
+    if (ipLocationCache[ip]) {
+        if (cell) cell.textContent = ipLocationCache[ip];
+        if (showModal) showMessageModal(`${ip} 的归属地：${ipLocationCache[ip]}`);
+        return;
+    }
+
+    if (cell) cell.textContent = "查询中...";
+    if (showModal) showMessageModal(`正在查询 ${ip} 的归属地，请稍候...`);
+
+    const callbackName = "jsonp_cb_" + ip.replace(/\./g, "_");
+    window[callbackName] = function(d) {
+        let location = "未找到";
+        if (d && d.data && d.data[0] && d.data[0].location) {
+            location = d.data[0].location;
+            ipLocationCache[ip] = location;
+        }
+
+        if (cell) cell.textContent = location;
+        if (showModal) showMessageModal(`${ip} 的归属地：${location}`);
+
+        delete window[callbackName];
+    };
+
+    const script = document.createElement("script");
+    script.src = `http://opendata.baidu.com/api.php?co=&resource_id=6006&oe=utf8&query=${ip}&cb=${callbackName}`;
+    document.body.appendChild(script);
+}
+
 function filterLogByIp(ip) {
     const logContent = document.getElementById("accessLogContent").innerText || '';
     const lines = logContent.split('\n').filter(line => line.includes(ip));
     const filtered = lines.length > 0 ? lines.map(line => line.trimEnd()).join('\n') : `无记录：${ip}`;
     showMessageModal(`
-        <div id="filteredLog" style="width:930px; height:504px; overflow:auto; font-family:monospace; white-space:pre;">${filtered.replace(/\n/g, '<br>')}</div>
+        <div id="filteredLog" style="width:1000px; height:504px; overflow:auto; font-family:monospace; white-space:pre;">${filtered.replace(/\n/g, '<br>')}</div>
     `);
     const d = document.getElementById("filteredLog");
-    if (d) d.scrollTop = d.scrollHeight;;
+    if (d) d.scrollTop = d.scrollHeight;
 }
 
 function addIp(ip, type) {
@@ -838,8 +907,8 @@ function displayPage(data, page) {
     }
 
     // 列索引和对应字段的映射
-    const columns = ['groupTitle', 'channelName', 'streamUrl', 'iconUrl', 'tvgId', 
-                    'tvgName', 'resolution', 'speed', 'disable', 'modified'];
+    const columns = ['groupPrefix', 'groupTitle', 'channelName', 'streamUrl', 'iconUrl', 
+                    'tvgId', 'tvgName', 'resolution', 'speed', 'disable', 'modified'];
 
     // 填充当前页的表格数据
     data.slice(start, end).forEach((item, index) => {
@@ -848,7 +917,7 @@ function displayPage(data, page) {
         row.innerHTML = `
             <td>${start + index + 1}</td>
             ${columns.map((col, columnIndex) => {
-                let cellContent = (item[col] || '').replace(/&/g, "&amp;");
+                let cellContent = String(item[col] || '').replace(/&/g, "&amp;");
                 let cellClass = '';
                 
                 // 处理 disable 和 modified 列
@@ -998,6 +1067,7 @@ function filterLiveSourceData() {
     const keyword = document.getElementById('liveSourceSearchInput').value.trim().toLowerCase();
     filteredLiveData = allLiveData.filter(item =>
         (item.channelName || '').toLowerCase().includes(keyword) ||
+        (item.groupPrefix || '').toLowerCase().includes(keyword) ||
         (item.groupTitle || '').toLowerCase().includes(keyword) ||
         (item.streamUrl || '').toLowerCase().includes(keyword) ||
         (item.tvgId || '').toLowerCase().includes(keyword) ||
@@ -1169,7 +1239,6 @@ function openLiveSourceConfigDialog(isNew = false) {
 function deleteSource() {
     const select = document.getElementById('live_source_config');
     const configName = select.value;
-    if (!configName) return;
 
     if (configName === 'default') {
         showMessageModal('默认配置不能删除！');
@@ -1223,22 +1292,69 @@ function cleanUnusedSource() {
 }
 
 // 显示直播源地址
-function showLiveUrl(token, serverUrl, tokenRange, modRewrite) {
-    const config = document.getElementById('live_source_config').value;
-    const tokenStr = (tokenRange == 1 || tokenRange == 3) ? `token=${token}` : '';
-    const urlParam = (config === 'default') ? '' : `url=${config}`;
-    const query = [tokenStr, urlParam].filter(Boolean).join('&');
+async function showLiveUrl() {
+    try {
+        // 并行获取 serverUrl 和 config
+        const [serverRes, configRes] = await Promise.all([
+            fetch('manage.php?get_env=true'),
+            fetch('manage.php?get_config=true')
+        ]);
 
-    const m3uPath = modRewrite ? '/tv.m3u' : '/index.php?type=m3u';
-    const txtPath = modRewrite ? '/tv.txt' : '/index.php?type=txt';
+        const serverData = await serverRes.json();
+        const configData = await configRes.json();
 
-    const m3uUrl = `${serverUrl}${m3uPath}${modRewrite && query ? '?' + query : (!modRewrite && query ? '&' + query : '')}`;
-    const txtUrl = `${serverUrl}${txtPath}${modRewrite && query ? '?' + query : (!modRewrite && query ? '&' + query : '')}`;
+        const serverUrl  = serverData.server_url;
+        const token      = configData.token.split('\n')[0];
+        const tokenMd5   = configData.token_md5;
+        const tokenRange = parseInt(configData.token_range, 10);
+        const redirect = serverData.redirect ? true : false;
 
-    const message = 
-        `M3U：<br><a href="${m3uUrl}" target="_blank">${m3uUrl}</a>&ensp;<a href="${m3uUrl}" download="tv.m3u">下载</a><br>` +
-        `TXT：<br><a href="${txtUrl}" target="_blank">${txtUrl}</a>&ensp;<a href="${txtUrl}" download="tv.txt">下载</a><br>`;
-    showMessageModal(message);
+        // live_source_config 仍从页面 select/input 获取
+        const liveSourceElem = document.getElementById('live_source_config');
+        const configValue = liveSourceElem ? liveSourceElem.value : 'default';
+
+        const tokenStr = (tokenRange === 1 || tokenRange === 3) ? `token=${token}` : '';
+        const urlParam = (configValue === 'default') ? '' : `url=${configValue}`;
+        const query = [tokenStr, urlParam].filter(Boolean).join('&');
+
+        const m3uPath = redirect ? '/tv.m3u' : '/index.php?type=m3u';
+        const txtPath = redirect ? '/tv.txt' : '/index.php?type=txt';
+
+        function buildUrl(base, path, query) {
+            let url = base + path;
+            if (query) url += (url.includes('?') ? '&' : '?') + query;
+            return url;
+        }
+        
+        const m3uUrl = buildUrl(serverUrl, m3uPath, query);
+        const txtUrl = buildUrl(serverUrl, txtPath, query);
+        
+        function buildCustomUrl(originalUrl, tokenMd5, mode) {
+            const url = new URL(originalUrl, location.origin);
+            if (tokenRange === 1 || tokenRange === 3) {
+                url.searchParams.set('token', tokenMd5);
+            }
+            url.searchParams.set(mode, '1');
+            return url.toString();
+        }
+        
+        const proxyM3uUrl = buildCustomUrl(m3uUrl, tokenMd5, 'proxy');
+        const proxyTxtUrl = buildCustomUrl(txtUrl, tokenMd5, 'proxy');
+        
+        const message =
+            `访问地址：<br>` +
+            `<a href="${m3uUrl}" target="_blank">${m3uUrl}</a>&ensp;<a href="${m3uUrl}" download="tv.m3u">下载</a><br>` +
+            `<a href="${txtUrl}" target="_blank">${txtUrl}</a>&ensp;<a href="${txtUrl}" download="tv.txt">下载</a><br>` +
+            `代理访问：<br>` +
+            `<a href="${proxyM3uUrl}" target="_blank">${proxyM3uUrl}</a>&ensp;<a href="${proxyM3uUrl}" download="tv.m3u">下载</a><br>` +
+            `<a href="${proxyTxtUrl}" target="_blank">${proxyTxtUrl}</a>&ensp;<a href="${proxyTxtUrl}" download="tv.txt">下载</a>`;
+        
+        showMessageModal(message);
+
+    } catch (err) {
+        console.error('获取 serverUrl 或 config 失败:', err);
+        showMessageModal('无法获取服务器地址或配置信息，请稍后重试');
+    }
 }
 
 // 显示直播源模板
@@ -1351,7 +1467,7 @@ function filterChannels(type) {
                 row.innerHTML = `<td class="blue-span" 
                                     onclick="showModal('epg', true, { channel: '${item.original}', date: '${new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' })}' })">
                                     ${item.original} </td>
-                                <td contenteditable="true">${(item.mapped || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td>`;
+                                <td contenteditable="true">${String(item.mapped || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td>`;
                 row.querySelector('td[contenteditable]').addEventListener('input', function() {
                     item.mapped = this.textContent.trim();
                     document.getElementById(tableId).dataset[dataAttr] = JSON.stringify(allData);
@@ -1679,16 +1795,34 @@ document.getElementById('importFile').addEventListener('change', function() {
 });
 
 // 修改 token、user_agent 对话框
-function changeTokenUA(type, currentTokenUA) {
-    showMessageModal('');
-    typeStr = (type === 'token' ? 'Token' : 'User-Agent') + '<br>支持多个，每行一个';
-    document.getElementById('messageModalMessage').innerHTML = `
-        <div style="width: 450px;">
-            <h3>修改 ${typeStr}</h3>
-            <textarea id="newTokenUA" style="min-height: 250px; margin-bottom: 15px;">${currentTokenUA}</textarea>
-            <button onclick="updateTokenUA('${type}')" style="margin-bottom: -10px;">确认</button>
-        </div>
-    `;
+async function changeTokenUA(type) {
+    try {
+        // 获取 config
+        const res = await fetch('manage.php?get_config=true');
+        const config = await res.json();
+
+        // 根据 type 获取对应的值
+        let currentTokenUA = '';
+        if (type === 'token') {
+            currentTokenUA = config.token || '';
+        } else if (type === 'user_agent') {
+            currentTokenUA = config.user_agent || '';
+        }
+
+        showMessageModal('');
+        const typeStr = (type === 'token' ? 'Token' : 'User-Agent') + '<br>支持多个，每行一个';
+        document.getElementById('messageModalMessage').innerHTML = `
+            <div style="width: 450px;">
+                <h3>修改 ${typeStr}</h3>
+                <textarea id="newTokenUA" style="min-height: 250px; margin-bottom: 15px;">${currentTokenUA}</textarea>
+                <button onclick="updateTokenUA('${type}')" style="margin-bottom: -10px;">确认</button>
+            </div>
+        `;
+
+    } catch (err) {
+        console.error('获取 config 失败:', err);
+        showMessageModal('无法获取配置信息，请稍后重试');
+    }
 }
 
 // 更新 token、user_agent 到 config.json
@@ -1715,7 +1849,6 @@ function updateTokenUA(type) {
             }
             else {
                 showMessageModal('修改成功');
-                document.getElementById('change_ua_span').setAttribute('onclick', `changeTokenUA('user_agent', '${newTokenUA.replace(/\n/g, "\\n")}')`);
             }
         } else {
             showMessageModal('修改失败');
@@ -1725,39 +1858,70 @@ function updateTokenUA(type) {
 }
 
 // token_range 更变后进行提示
-function showTokenRangeMessage(token, serverUrl, modRewrite) {
-    var tokenRange = document.getElementById("token_range").value;
-    var message = '';
-    token = token.split('\n')[0];
+async function showTokenRangeMessage() {
+    try {
+        // 并行获取 serverUrl 和 config
+        const [serverRes, configRes] = await Promise.all([
+            fetch('manage.php?get_env=true'),
+            fetch('manage.php?get_config=true')
+        ]);
 
-    if (tokenRange == "1" || tokenRange == "3") {
-        const m3u = modRewrite ? `${serverUrl}/tv.m3u?token=${token}` : `${serverUrl}/index.php?type=m3u&token=${token}`;
-        const txt = modRewrite ? `${serverUrl}/tv.txt?token=${token}` : `${serverUrl}/index.php?type=txt&token=${token}`;
-        message += `直播源地址：<br><a href="${m3u}" target="_blank">${m3u}</a><br>
-                    <a href="${txt}" target="_blank">${txt}</a>`;
+        const serverData = await serverRes.json();
+        const configData = await configRes.json();
+
+        const serverUrl  = serverData.server_url;
+        const tokenFull  = configData.token;
+        const redirect = serverData.redirect ? true : false;
+
+        // 从页面 select/input 获取 token_range
+        const tokenRangeElem = document.getElementById("token_range");
+        const tokenRange = tokenRangeElem ? tokenRangeElem.value : "1";
+
+        const token = tokenFull.split('\n')[0];
+        let message = '';
+
+        if (tokenRange === "1" || tokenRange === "3") {
+            const m3u = redirect ? `${serverUrl}/tv.m3u?token=${token}` : `${serverUrl}/index.php?type=m3u&token=${token}`;
+            const txt = redirect ? `${serverUrl}/tv.txt?token=${token}` : `${serverUrl}/index.php?type=txt&token=${token}`;
+            message += `直播源地址：<br><a href="${m3u}" target="_blank">${m3u}</a><br>
+                        <a href="${txt}" target="_blank">${txt}</a>`;
+        }
+
+        if (tokenRange === "2" || tokenRange === "3") {
+            if (message) message += '<br>';
+            message += `EPG地址：<br><a href="${serverUrl}/index.php?token=${token}" target="_blank">${serverUrl}/index.php?token=${token}</a><br>
+                        <a href="${serverUrl}/t.xml?token=${token}" target="_blank">${serverUrl}/t.xml?token=${token}</a><br>
+                        <a href="${serverUrl}/t.xml.gz?token=${token}" target="_blank">${serverUrl}/t.xml.gz?token=${token}</a>`;
+        }
+
+        if (message) {
+            showMessageModal(message);
+        }
+
+    } catch (err) {
+        console.error('获取 serverUrl 或 config 失败:', err);
+        showMessageModal('无法获取服务器地址或配置信息，请稍后重试');
     }
-
-    if (tokenRange == "2" || tokenRange == "3") {
-        if (message) message += '<br>';
-        message += `EPG地址：<br><a href="${serverUrl}/index.php?token=${token}" target="_blank">${serverUrl}/index.php?token=${token}</a><br>
-                    <a href="${serverUrl}/t.xml?token=${token}" target="_blank">${serverUrl}/t.xml?token=${token}</a><br>
-                    <a href="${serverUrl}/t.xml.gz?token=${token}" target="_blank">${serverUrl}/t.xml.gz?token=${token}</a>`;
-    }
-
-    if (message) {
-        showMessageModal(message);
-    }
-
-    document.getElementById('showLiveUrlBtn').setAttribute(
-        'onclick',
-        `showLiveUrl('${token}', '${serverUrl}', '${tokenRange}', ${modRewrite})`
-    );
 }
 
 // 监听 debug_mode 更变
 function debugMode(selectElem) {
     document.getElementById("accessLogBtn").style.display = selectElem.value === "1" ? "inline-block" : "none";
 }
+
+// 页面加载时恢复大小
+const ids = ["xml_urls", "channel_mappings", "sourceUrlTextarea", "live-source-table-container", "gen_list_text"];
+const prefix = "height_";
+const saveHeight = (el) => {
+    if (el.offsetHeight > 0) localStorage.setItem(prefix + el.id, el.offsetHeight);
+};
+ids.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const h = localStorage.getItem(prefix + id);
+    if (h) el.style.height = h + "px";
+    new ResizeObserver(() => saveHeight(el)).observe(el);
+});
 
 // 切换主题
 document.getElementById('themeSwitcher').addEventListener('click', function() {
