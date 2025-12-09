@@ -83,7 +83,7 @@ function deleteOldData($db, $thresholdDate, &$log_messages) {
         $redis->flushAll();
         logMessage($log_messages, "【Redis】 已清空。");
     } else {
-        logMessage($log_messages, "【" . ucfirst($cached_type) . "】 状态异常。");
+        logMessage($log_messages, "【" . ucfirst($cached_type) . "】 状态异常。", true);
     }
 
     echo "<br>";
@@ -135,7 +135,7 @@ function getGenList($db) {
         return ['gen_list_mapping' => [], 'gen_list' => []];
     }
 
-    $channelsSimplified = explode("\n", t2s(implode("\n", $channels)));
+    $channelsSimplified = t2sBatch($channels);
     $allEpgChannels = $db->query("SELECT DISTINCT channel FROM epg_data WHERE date = DATE('now')")
         ->fetchAll(PDO::FETCH_COLUMN); // 避免匹配只有历史 EPG 的频道
 
@@ -190,7 +190,7 @@ function downloadXmlData($xml_url, $userAgent, $db, &$log_messages, $gen_list, $
         if (substr($xml_data, 0, 2) === "\x1F\x8B") { // 通过魔数判断 .gz 文件
             $mtime = $mtime ?: unpack('V', substr($xml_data, 4, 4))[1];
             if (!($xml_data = gzdecode($xml_data))) {
-                logMessage($log_messages, '【解压失败】');
+                logMessage($log_messages, '【解压失败】', true);
                 return;
             }
         }
@@ -210,11 +210,11 @@ function downloadXmlData($xml_url, $userAgent, $db, &$log_messages, $gen_list, $
             static $retryCount = 0;
             if ($retryCount < 5) {
                 $retryCount++;
-                logMessage($log_messages, "【格式错误！！！】 不是有效的XML文件，10秒后重试 ({$retryCount}/5)");
+                logMessage($log_messages, "【格式错误！！！】 不是有效的XML文件，10秒后重试 ({$retryCount}/5)", true);
                 sleep(10);
                 return downloadXmlData($xml_url, $userAgent, $db, $log_messages, $gen_list, $white_list, $black_list, $time_offset, $replacePattern, $bindPattern);
             } else {
-                logMessage($log_messages, "【格式错误！！！】 重试5次后仍不是有效的XML文件");
+                logMessage($log_messages, "【格式错误！！！】 重试5次后仍不是有效的XML文件", true);
                 echo "<br>";
                 return;
             }
@@ -248,10 +248,10 @@ function downloadXmlData($xml_url, $userAgent, $db, &$log_messages, $gen_list, $
             logMessage($log_messages, "【更新】 成功：入库 {$processCount} 条，跳过 {$skipCount} 条");
         } catch (Exception $e) {
             $db->rollBack();
-            logMessage($log_messages, "【处理数据出错！！！】 " . $e->getMessage());
+            logMessage($log_messages, "【处理数据出错！！！】 " . $e->getMessage(), true);
         }
     } else {
-        logMessage($log_messages, "【下载】 失败！！！错误信息：$error");
+        logMessage($log_messages, "【下载】 失败！！！错误信息：$error", true);
     }
     echo "<br>";
 }
@@ -290,8 +290,7 @@ function processXmlData($xml_url, $xml_data, $db, $gen_list, $white_list, $black
     }
 
     // 繁简转换和频道筛选
-    $simplifiedChannelNames = ($Config['cht_to_chs'] ?? 1) === 1 ? 
-        explode("\n", t2s(implode("\n", $cleanChannelNames))) : $cleanChannelNames;
+    $simplifiedChannelNames = ($Config['cht_to_chs'] ?? 1) === 1 ? t2sBatch($cleanChannelNames) : $cleanChannelNames;
     $channelNamesMap = [];
     foreach ($cleanChannelNames as $channelId => $channelName) {
         $channelNameSimplified = array_shift($simplifiedChannelNames);
@@ -427,7 +426,7 @@ function processIconListAndXmltv($db, $gen_list_mapping, &$log_messages) {
     // 更新 iconList.json 文件中的数据
     if (file_put_contents($iconListPath, 
         json_encode($iconList, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)) === false) {
-        logMessage($log_messages, "【台标列表】 更新 iconList.json 时发生错误！！！");
+        logMessage($log_messages, "【台标列表】 更新 iconList.json 时发生错误！！！", true);
     } else {
         logMessage($log_messages, "【台标列表】 已更新 iconList.json");
     }
@@ -553,6 +552,24 @@ function compressXmlFile($xmlFilePath) {
     gzclose($gzFile);
 }
 
+// Server酱消息接口
+function sc_send($title, $desp = '', $key = '[SENDKEY]', $tags = '', $short = '')
+{
+    $postdata = http_build_query([
+        'text'  => $title,
+        'desp'  => $desp,
+        'tags'  => $tags,   // SCTP 多标签用 | 分隔
+        'short' => $short,  // 消息卡片简短描述
+    ]);
+
+    $url = strpos($key, 'sctp') === 0
+        ? "https://" . preg_replace('/^sctp(\d+)t.*$/', '$1', $key) . ".push.ft07.com/send/{$key}.send"
+        : "https://sctapi.ftqq.com/{$key}.send";
+
+    list($response, $error) = downloadData($url, '', 10, 5, 1, $postdata);
+    return $response ?: '';
+}
+
 // 记录开始时间
 $startTime = microtime(true);
 
@@ -675,7 +692,7 @@ if ($syncMode = $Config['live_source_auto_sync'] ?? false) {
     if ($parseResult === true) {
         logMessage($log_messages, "【直播文件】 已同步更新{$tip}");
     } else {
-        logMessage($log_messages, "【直播文件】 部分更新异常{$tip}：" . rtrim(str_replace('<br>', '、', $parseResult), '、'));
+        logMessage($log_messages, "【直播文件】 部分更新异常{$tip}：" . rtrim(str_replace('<br>', '、', $parseResult), '、'), true);
     }
 }
 
@@ -687,6 +704,31 @@ $endTime = microtime(true); // 记录结束时间
 $executionTime = round($endTime - $startTime, 1);
 echo "<br>";
 logMessage($log_messages, "【更新完成】 {$executionTime} 秒。节目数量：更新前 {$initialCount} 条，更新后 {$finalCount} 条。" . $msg);
+
+// 发送通知
+if ($Config['notify'] ?? false) {
+    $sckey = $Config['serverchan_key'] ?? '';
+    if (empty($sckey)) {
+        logMessage($log_messages, "【发送通知】 未设置 sckey，跳过发送");
+    } else {
+        $log_message_str = implode("\n\n", array_map(function($msg) {
+                $isError = strpos($msg, 'color:red') !== false;
+                $plain = strip_tags($msg);
+                return ($isError ? '**' : '') . $plain . ($isError ? '**' : '');
+            }, $log_messages)) 
+            . "\n\n[项目地址：https://github.com/taksssss/iptv-tool](https://github.com/taksssss/iptv-tool)";
+        $tag = 'IPTV工具箱';
+        $short = date('Y-m-d H:i:s') . '：' . (trim($msg) ?: '节目数无变化。');
+        $result = sc_send('定时任务日志', $log_message_str, $sckey, $tag, $short);
+        $resp = json_decode($result, true);
+        $errno = $resp['errno'] ?? $resp['data']['errno'] ?? 1;
+        if ($errno == 0) {
+            logMessage($log_messages, "【发送通知】 成功");
+        } else {
+            logMessage($log_messages, "【通知失败】 返回内容：" . json_encode($resp, JSON_UNESCAPED_UNICODE), true);
+        }
+    }
+}
 
 // 将日志信息写入数据库
 $log_message_str = implode("<br>", $log_messages);
