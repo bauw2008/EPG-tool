@@ -14,19 +14,20 @@
  * - 支持按延迟排序、同频道接口数量限制，并自动更新数据库及生成 M3U/TXT 文件
  *
  * 参数说明：
- * - backgroundMode=true   后台运行测速（关闭浏览器也继续执行）
- * - cleanMode=true        清空测速数据并重置频道状态
+ * - backgroundMode=1      后台运行测速（关闭浏览器也继续执行）
+ * - cleanMode=1           清空测速数据并重置频道状态
  *
  * 作者: Tak
  * GitHub: https://github.com/taksssss/iptv-tool
  */
 
-// 检测是否为 AJAX 请求或 CLI 运行
-if (!(isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest')
-    && php_sapi_name() !== 'cli') {
-    http_response_code(403); // 返回403禁止访问
-    exit('禁止直接访问');
+// 检测是否有运行权限
+session_start();
+if (php_sapi_name() !== 'cli' && (empty($_SESSION['loggedin']) || $_SESSION['loggedin'] !== true)) {
+    http_response_code(403);
+    exit('无访问权限，请先登录。');
 }
+session_write_close();
 
 // 检测 ffmpeg 是否安装
 if (!shell_exec('which ffprobe')) {
@@ -35,7 +36,7 @@ if (!shell_exec('which ffprobe')) {
 }
 
 // 如果启用 backgroundMode，则在后台执行自身并退出
-if (isset($_GET['backgroundMode']) && $_GET['backgroundMode'] === 'true') {
+if (!empty($_GET['backgroundMode'])) {
     exec("pgrep -f ffprobe", $output);
     if (count($output) > 0) exit('已有任务在运行。');
     exec("php check.php > /dev/null 2>&1 &");
@@ -59,9 +60,10 @@ $minHeight = $Config['min_resolution_height'] ?? 0;
 $urlsLimit = $Config['urls_limit'] ?? 0;
 $sortByDelay = $Config['sort_by_delay'] ?? 0;
 $liveSourceConfig = $Config['live_source_config'] ?? 'default';
+$token = $Config['token'];
 
-// cleanMode 参数为 true 时，清除测速数据
-if (isset($_GET['cleanMode']) && $_GET['cleanMode'] === 'true') {
+// cleanMode 参数为 1 时，清除测速数据
+if (!empty($_GET['cleanMode'])) {
     // 查找 channels_info 表中 speed = 'N/A' 的 streamUrl 列表
     $stmt = $db->prepare("SELECT streamUrl FROM channels_info WHERE speed = 'N/A'");
     $stmt->execute();
@@ -86,20 +88,20 @@ echo '<strong><span style="color: red;">前台测速过程中请勿关闭浏览�
 
 // 从数据库读取 channels 数据
 $channels = [];
-$headers = [];
+$channelHeaders = [];
 
 $stmt = $db->prepare("SELECT * FROM channels WHERE config = ?");
 $stmt->execute([$liveSourceConfig]);
 while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-    if (!$headers) $headers = array_keys($row);
+    if (!$channelHeaders) $channelHeaders = array_keys($row);
     $channels[] = array_values($row);
 }
 
 // 定位字段索引
-$streamUrlIndex = array_search('streamUrl', $headers);
-$channelNameIndex = array_search('channelName', $headers);
-$disableIndex = array_search('disable', $headers);
-$modifiedIndex = array_search('modified', $headers);
+$streamUrlIndex = array_search('streamUrl', $channelHeaders);
+$channelNameIndex = array_search('channelName', $channelHeaders);
+$disableIndex = array_search('disable', $channelHeaders);
+$modifiedIndex = array_search('modified', $channelHeaders);
 
 // 确保必要字段存在
 if ($streamUrlIndex === false) {
@@ -112,7 +114,30 @@ $total = count($channels);
 $testedUrls = [];
 
 foreach ($channels as $i => $channel) {
-    $streamUrl = strtok($channel[$streamUrlIndex], '$'); // 处理带有 $ 的 URL
+    $oriUrl = $channel[$streamUrlIndex];
+
+    // 获取 http-referrer、http-user-agent
+    $requestHeaders = [];
+    if (preg_match('/^#EXTVLCOPT:http-referrer=(.+)$/mi', $oriUrl, $m)) {
+        $requestHeaders['Referer'] = trim($m[1]);
+    }
+    if (preg_match('/^#EXTVLCOPT:http-user-agent=(.+)$/mi', $oriUrl, $m)) {
+        $requestHeaders['User-Agent'] = trim($m[1]);
+    }
+
+    // 取最后一行为 URL
+    $raw = preg_split('/\r\n|\r|\n/', trim($oriUrl));
+    $raw = trim(end($raw));
+
+    // 处理 #NOPROXY、#PROXY
+    $raw = str_replace('#NOPROXY', '', $raw);
+    if (preg_match('/#PROXY=([^#]+)/', $raw, $m)) {
+        $raw = decryptUrl(urldecode($m[1]), $token);
+    }
+
+    // 处理带有 $ 的 URL
+    $streamUrl = strtok($raw, '$');
+
     $channelName = $channelNameIndex !== false ? $channel[$channelNameIndex] : '未知频道';
 
     // 跳过空的 streamUrl
@@ -126,25 +151,38 @@ foreach ($channels as $i => $channel) {
         continue;
     }
 
+    // 初始化变量
+    $resolution = $speed = 'N/A';
+    $disable = $modified = 1;
+
     if (isset($testedUrls[$streamUrl])) {
         // 如果已经测速过，直接复用结果
         [$resolution, $speed, $disable, $modified] = $testedUrls[$streamUrl];
+        $channelsInfoMap[$oriUrl] = is_numeric($speed) ? (int)$speed : PHP_INT_MAX;
         echo "<em>复用测速结果：分辨率: {$resolution}, 访问速度: {$speed} ms</em><br><br>";
     } else {
         // 使用 ffprobe 测速
         $startTime = microtime(true);
-        $cmd = "ffprobe -rw_timeout 2000000 -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 \"{$streamUrl}\"";
+
+        // 拼接 headers
+        $requestHeaderStr = '';
+        foreach ($requestHeaders as $k => $v) {
+            $requestHeaderStr .= "{$k}: {$v}\r\n";
+        }
+        $requestHeaderStr = $requestHeaderStr ? '-headers ' . escapeshellarg($requestHeaderStr) . ' ' : '';
+
+        $cmd = "ffprobe -rw_timeout 2000000 {$requestHeaderStr}"
+             . "-v error -select_streams v:0 "
+             . "-show_entries stream=width,height "
+             . "-of csv=p=0 "
+             . escapeshellarg($streamUrl);
         exec($cmd, $output, $returnVar);
         $duration = round((microtime(true) - $startTime) * 1000);
 
         if ($returnVar !== 0) {
-            $resolution = $speed = 'N/A';
-            $disable = 1;
-            $modified = 1;
             echo '<strong><span style="color: red;">无法获取流信息，已停用</span></strong><br><br>';
         } else {
             $speed = $duration;
-            $resolution = 'N/A';
             $disable = 0;
             $modified = 0;
 
@@ -167,17 +205,25 @@ foreach ($channels as $i => $channel) {
 
         // 缓存测速结果
         $testedUrls[$streamUrl] = [$resolution, $speed, $disable, $modified];
-
-        // 写入数据库
-        $stmt = $db->prepare(
-            ($Config['db_type'] === 'sqlite' ? "INSERT OR REPLACE" : "REPLACE") .
-            " INTO channels_info (streamUrl, resolution, speed) VALUES (?, ?, ?)"
-        );
-        $stmt->execute([$streamUrl, $resolution, $speed]);
     }
 
+    // 写入数据库
+    $sql = "
+        INSERT INTO channels_info (streamUrl, resolution, speed)
+        VALUES (?, ?, ?)
+    ";
+    $sql .= ($Config['db_type'] === 'sqlite')
+        ? " ON CONFLICT(streamUrl) DO UPDATE SET
+                resolution = excluded.resolution,
+                speed = excluded.speed"
+        : " ON DUPLICATE KEY UPDATE
+                resolution = VALUES(resolution),
+                speed = VALUES(speed)";
+    $stmt = $db->prepare($sql);
+    $stmt->execute([$oriUrl, $resolution, $speed]);
+
     // 更新内存映射和频道状态
-    $channelsInfoMap[$streamUrl] = is_numeric($speed) ? (int)$speed : PHP_INT_MAX;
+    $channelsInfoMap[$oriUrl] = is_numeric($speed) ? (int)$speed : PHP_INT_MAX;
     $channel[$disableIndex] = $disable;
     $channel[$modifiedIndex] = $modified;
     $channels[$i] = $channel;
@@ -223,11 +269,11 @@ $db->beginTransaction();
 $stmt = $db->prepare("DELETE FROM channels WHERE config = ?");
 $stmt->execute([$liveSourceConfig]);
 $channelsData = [];
-$placeholders = implode(', ', array_fill(0, count($headers), '?'));
-$sql = "INSERT INTO channels (" . implode(', ', $headers) . ") VALUES ($placeholders)";
+$placeholders = implode(', ', array_fill(0, count($channelHeaders), '?'));
+$sql = "INSERT INTO channels (" . implode(', ', $channelHeaders) . ") VALUES ($placeholders)";
 $stmt = $db->prepare($sql);
 foreach ($channels as $row) {
-    $channelsData[] = array_combine($headers, $row);
+    $channelsData[] = array_combine($channelHeaders, $row);
     $stmt->execute($row);
 }
 $db->commit();
